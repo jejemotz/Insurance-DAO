@@ -10,6 +10,8 @@
 (define-constant err-not-pool-member (err u107))
 (define-constant err-invalid-amount (err u108))
 (define-constant err-claim-period-active (err u109))
+(define-constant err-cannot-delegate-self (err u110))
+(define-constant err-delegation-not-found (err u111))
 
 (define-data-var next-pool-id uint u1)
 (define-data-var next-claim-id uint u1)
@@ -56,6 +58,11 @@
 (define-map claim-votes
   { claim-id: uint, voter: principal }
   { vote: bool, voted-at: uint }
+)
+
+(define-map vote-delegations
+  { pool-id: uint, delegator: principal }
+  { delegate: principal, delegated-at: uint }
 )
 
 (define-map pool-stats
@@ -165,24 +172,28 @@
 (define-public (vote-on-claim (claim-id uint) (approve bool))
   (let (
     (claim (unwrap! (map-get? insurance-claims claim-id) err-claim-not-found))
-    (member (unwrap! (map-get? pool-members { pool-id: (get pool-id claim), member: tx-sender }) err-not-pool-member))
+    (pool-id (get pool-id claim))
+    (member (unwrap! (map-get? pool-members { pool-id: pool-id, member: tx-sender }) err-not-pool-member))
     (existing-vote (map-get? claim-votes { claim-id: claim-id, voter: tx-sender }))
+    (delegation (map-get? vote-delegations { pool-id: pool-id, delegator: tx-sender }))
+    (vote-power (count-delegated-votes pool-id tx-sender))
   )
     (asserts! (is-none existing-vote) err-already-voted)
     (asserts! (< stacks-block-height (get expires-at claim)) err-claim-expired)
     (asserts! (is-eq (get status claim) "pending") err-claim-expired)
+    (asserts! (is-none delegation) err-already-voted)
     (map-set claim-votes { claim-id: claim-id, voter: tx-sender }
       { vote: approve, voted-at: stacks-block-height })
     (if approve
       (map-set insurance-claims claim-id
         (merge claim { 
-          votes-for: (+ (get votes-for claim) u1),
-          total-voters: (+ (get total-voters claim) u1)
+          votes-for: (+ (get votes-for claim) vote-power),
+          total-voters: (+ (get total-voters claim) vote-power)
         }))
       (map-set insurance-claims claim-id
         (merge claim { 
-          votes-against: (+ (get votes-against claim) u1),
-          total-voters: (+ (get total-voters claim) u1)
+          votes-against: (+ (get votes-against claim) vote-power),
+          total-voters: (+ (get total-voters claim) vote-power)
         }))
     )
     (ok true)
@@ -274,4 +285,34 @@
     pool (ok (/ (* coverage-amount (get premium-rate pool)) u10000))
     err-pool-not-found
   )
+)
+
+(define-public (delegate-vote (pool-id uint) (delegate principal))
+  (let (
+    (pool (unwrap! (map-get? insurance-pools pool-id) err-pool-not-found))
+    (member (unwrap! (map-get? pool-members { pool-id: pool-id, member: tx-sender }) err-not-pool-member))
+    (delegate-member (unwrap! (map-get? pool-members { pool-id: pool-id, member: delegate }) err-not-pool-member))
+  )
+    (asserts! (not (is-eq tx-sender delegate)) err-cannot-delegate-self)
+    (map-set vote-delegations { pool-id: pool-id, delegator: tx-sender }
+      { delegate: delegate, delegated-at: stacks-block-height })
+    (ok true)
+  )
+)
+
+(define-public (revoke-delegation (pool-id uint))
+  (let (
+    (delegation (unwrap! (map-get? vote-delegations { pool-id: pool-id, delegator: tx-sender }) err-delegation-not-found))
+  )
+    (map-delete vote-delegations { pool-id: pool-id, delegator: tx-sender })
+    (ok true)
+  )
+)
+
+(define-read-only (get-delegation (pool-id uint) (delegator principal))
+  (map-get? vote-delegations { pool-id: pool-id, delegator: delegator })
+)
+
+(define-read-only (count-delegated-votes (pool-id uint) (voter principal))
+  u1
 )
